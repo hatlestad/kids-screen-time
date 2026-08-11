@@ -1,12 +1,11 @@
 const STORAGE_KEY = 'kidsScreenTimeData';
-const LIMIT = 30; // minutes per category
+const TOTAL_LIMIT = 120; // minutes total per child per day
 const INCREMENT = 10;
 
 const CATEGORIES = [
   { id: 'videoGames', name: 'Video Games', icon: '🎮' },
   { id: 'tvShow', name: 'TV Show', icon: '📺' },
   { id: 'movie', name: 'Movie', icon: '🎬' },
-  { id: 'flexTime', name: 'Flex Time', icon: '✨' },
 ];
 
 const CHILDREN = [
@@ -56,6 +55,7 @@ function ensureFreshData() {
   const dayKey = getCurrentDayKey();
   let data = loadData();
 
+  // Migrate / reset if day changed or structure is old (had flexTime or per-cat limits)
   if (!data || data.dayKey !== dayKey) {
     data = {
       dayKey,
@@ -63,8 +63,23 @@ function ensureFreshData() {
       liam: createEmptyUsage(),
     };
     saveData(data);
+  } else {
+    // Ensure only the current 3 categories exist (clean up any old flexTime)
+    for (const child of CHILDREN) {
+      const usage = data[child.id] || createEmptyUsage();
+      const clean = createEmptyUsage();
+      for (const cat of CATEGORIES) {
+        clean[cat.id] = usage[cat.id] || 0;
+      }
+      data[child.id] = clean;
+    }
   }
   return data;
+}
+
+function getTotal(childId) {
+  const usage = data[childId] || {};
+  return CATEGORIES.reduce((sum, cat) => sum + (usage[cat.id] || 0), 0);
 }
 
 function formatDay(dayKey) {
@@ -82,15 +97,21 @@ let data = ensureFreshData();
 let justUpdated = null; // { childId, catId }
 
 function addTime(childId, categoryId) {
-  const current = data[childId][categoryId] || 0;
-  if (current >= LIMIT) return;
+  const total = getTotal(childId);
+  if (total >= TOTAL_LIMIT) return;
 
-  const nextValue = Math.min(current + INCREMENT, LIMIT);
+  const current = data[childId][categoryId] || 0;
+  const nextValue = current + INCREMENT;
+
+  // Cap the last increment so we never exceed the total limit
+  const newTotal = total - current + nextValue;
+  const actualAdd = newTotal > TOTAL_LIMIT ? TOTAL_LIMIT - total : INCREMENT;
+
   data = {
     ...data,
     [childId]: {
       ...data[childId],
-      [categoryId]: nextValue,
+      [categoryId]: current + actualAdd,
     },
   };
   saveData(data);
@@ -120,31 +141,42 @@ function render() {
   `;
 
   for (const child of CHILDREN) {
+    const total = getTotal(child.id);
+    const remaining = Math.max(0, TOTAL_LIMIT - total);
+    const exhausted = remaining === 0;
+    const percent = Math.min(100, (total / TOTAL_LIMIT) * 100);
+
     html += `
       <section class="child-card ${child.colorClass}">
         <div class="child-header">
           <h2 class="child-name">${child.name}</h2>
         </div>
+
+        <!-- Total daily progress -->
+        <div class="total-section ${exhausted ? 'exhausted' : ''}">
+          <div class="total-top">
+            <div class="total-label">Today's Total</div>
+            <div class="total-stats">
+              ${exhausted
+                ? `<span class="used-up">${total} / ${TOTAL_LIMIT} min · All used ✓</span>`
+                : `<span>${total} / ${TOTAL_LIMIT} min</span> · <span class="left">${remaining} left</span>`
+              }
+            </div>
+          </div>
+          <div class="progress-bar total-bar">
+            <div class="progress-fill ${exhausted ? 'full' : child.colorClass}" style="width: ${percent}%"></div>
+          </div>
+        </div>
+
         <div class="categories">
     `;
 
     for (const cat of CATEGORIES) {
       const used = data[child.id]?.[cat.id] ?? 0;
-      const remaining = Math.max(0, LIMIT - used);
-      const exhausted = remaining === 0;
-      const percent = Math.min(100, (used / LIMIT) * 100);
       const isJust =
         justUpdated &&
         justUpdated.childId === child.id &&
         justUpdated.catId === cat.id;
-
-      const statsHtml = exhausted
-        ? `<span class="used-up">All used ✓</span>`
-        : `<span>${used} used</span> · <span class="left">${remaining} left</span>`;
-
-      const btnText = exhausted ? 'Done for today' : '+ 10 min';
-      const btnDisabled = exhausted ? 'disabled' : '';
-      const fillClass = exhausted ? 'full' : child.colorClass;
 
       html += `
         <div class="category ${exhausted ? 'exhausted' : ''} ${isJust ? 'just-updated' : ''}">
@@ -152,20 +184,19 @@ function render() {
             <div class="category-icon">${cat.icon}</div>
             <div class="category-info">
               <div class="category-name">${cat.name}</div>
-              <div class="category-stats">${statsHtml}</div>
+              <div class="category-stats">
+                <span class="cat-minutes">${used} min</span>
+              </div>
             </div>
-          </div>
-          <div class="progress-bar">
-            <div class="progress-fill ${fillClass}" style="width: ${percent}%"></div>
           </div>
           <button
             class="add-btn ${child.colorClass}"
-            ${btnDisabled}
+            ${exhausted ? 'disabled' : ''}
             data-child="${child.id}"
             data-cat="${cat.id}"
             aria-label="Add 10 minutes of ${cat.name} for ${child.name}"
           >
-            ${btnText}
+            ${exhausted ? 'Done for today' : '+ 10 min'}
           </button>
         </div>
       `;
